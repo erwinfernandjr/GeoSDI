@@ -31,7 +31,7 @@ from reportlab.lib.enums import TA_CENTER, TA_LEFT
 st.set_page_config(page_title="GeoSDI System", page_icon="🛣️", layout="wide")
 
 st.title("🛣️ GeoSDI: Sistem Analisis Kondisi Jalan")
-st.markdown("Otomatisasi perhitungan Surface Distress Index (SDI) dengan ekstraksi kedalaman rutting otomatis via DSM.")
+st.markdown("Otomatisasi perhitungan Surface Distress Index (SDI) berbagis GIS.")
 
 st.divider()
 
@@ -94,9 +94,8 @@ def hitung_depth_cm(gdf, dsm_path, buffer_distance=0.3):
         z_min = stats_hole[i]["percentile_10"]
         z_ref = stats_ring[i]["median"]
         
-        # Asumsi unit DSM adalah meter, kalikan 100 untuk menjadi cm
         depth = (z_ref - z_min) * 100 if (z_min is not None and z_ref is not None) else 0
-        depth = max(0, min(depth, 15)) # Clamp realistis max 15 cm untuk rutting SDI
+        depth = max(0, min(depth, 15)) 
         depth_list.append(depth)
 
     gdf = gdf.copy()
@@ -104,48 +103,32 @@ def hitung_depth_cm(gdf, dsm_path, buffer_distance=0.3):
     return gdf
 
 def hitung_sdi(persen_retak, lebar_retak, jumlah_lubang, kedalaman_rutting):
-    # SDI 1 (Persentase Luas Retak)
-    if persen_retak == 0:
-        sdi1 = 0
-    elif persen_retak < 10:
-        sdi1 = 5
-    elif persen_retak <= 30:
-        sdi1 = 20
-    else:
-        sdi1 = 40
+    # SDI 1 
+    if persen_retak == 0: sdi1 = 0
+    elif persen_retak < 10: sdi1 = 5
+    elif persen_retak <= 30: sdi1 = 20
+    else: sdi1 = 40
 
-    # SDI 2 (Lebar Retak)
+    # SDI 2 
     sdi2 = sdi1 * 2 if lebar_retak > 3 else sdi1
 
-    # SDI 3 (Jumlah Lubang)
-    if jumlah_lubang == 0:
-        sdi3 = sdi2
-    elif jumlah_lubang < 10:
-        sdi3 = sdi2 + 15
-    elif jumlah_lubang <= 50:
-        sdi3 = sdi2 + 75
-    else:
-        sdi3 = sdi2 + 225
+    # SDI 3 
+    if jumlah_lubang == 0: sdi3 = sdi2
+    elif jumlah_lubang < 10: sdi3 = sdi2 + 15
+    elif jumlah_lubang <= 50: sdi3 = sdi2 + 75
+    else: sdi3 = sdi2 + 225
 
-    # SDI 4 (Kedalaman Rutting/Alur dalam cm)
-    if kedalaman_rutting == 0:
-        sdi4 = sdi3
-    elif kedalaman_rutting < 1:
-        sdi4 = sdi3 + (5 * 0.5)
-    elif kedalaman_rutting <= 3:
-        sdi4 = sdi3 + (5 * 2)
-    else:
-        sdi4 = sdi3 + (5 * 4)
+    # SDI 4 
+    if kedalaman_rutting == 0: sdi4 = sdi3
+    elif kedalaman_rutting < 1: sdi4 = sdi3 + (5 * 0.5)
+    elif kedalaman_rutting <= 3: sdi4 = sdi3 + (5 * 2)
+    else: sdi4 = sdi3 + (5 * 4)
 
-    # Klasifikasi Kondisi
-    if sdi4 < 50:
-        kondisi = "Baik"
-    elif sdi4 <= 100:
-        kondisi = "Sedang"
-    elif sdi4 <= 150:
-        kondisi = "Rusak Ringan"
-    else:
-        kondisi = "Rusak Berat"
+    # Klasifikasi
+    if sdi4 < 50: kondisi = "Baik"
+    elif sdi4 <= 100: kondisi = "Sedang"
+    elif sdi4 <= 150: kondisi = "Rusak Ringan"
+    else: kondisi = "Rusak Berat"
         
     return sdi1, sdi2, sdi3, sdi4, kondisi
 
@@ -179,7 +162,7 @@ col1, col2, col3 = st.columns(3)
 with col1:
     st.subheader("📁 1. Data Dasar Jalan")
     jalan_file = st.file_uploader("Upload Shapefile Jalan (.zip)", type="zip", key="jalan")
-    st.info("💡 Pastikan EPSG sesuai zona UTM wilayah agar hitungan presisi.")
+    st.info("💡 Pastikan EPSG sesuai zona UTM wilayah.")
 
 with col2:
     st.subheader("⚠️ 2. Data Kerusakan")
@@ -268,7 +251,6 @@ if st.button("🚀 Proses & Hitung SDI", type="primary", use_container_width=Tru
                             elif gdf.crs != seg_gdf.crs:
                                 gdf.to_crs(seg_gdf.crs, inplace=True)
 
-                    # PROSES KEDALAMAN RUTTING OTOMATIS DARI DSM
                     if not gdf_rutting.empty:
                         gdf_rutting = hitung_depth_cm(gdf_rutting, dsm_path)
 
@@ -279,7 +261,6 @@ if st.button("🚀 Proses & Hitung SDI", type="primary", use_container_width=Tru
                         seg_poly = gpd.GeoDataFrame(geometry=[seg.geometry], crs=seg_gdf.crs)
                         luas_seg = seg["Luas_Segmen"]
                         
-                        # --- RETAK ---
                         persen_retak = 0.0
                         lebar_retak = 0.0
                         if not gdf_retak.empty:
@@ -291,22 +272,19 @@ if st.button("🚀 Proses & Hitung SDI", type="primary", use_container_width=Tru
                                 valid_lengths = lengths[lengths > 0]
                                 if len(valid_lengths) > 0:
                                     retak_seg.loc[lengths > 0, "lebar_calc"] = retak_seg.geometry.area / valid_lengths
-                                    lebar_retak = retak_seg["lebar_calc"].mean() * 1000 # konversi ke mm
+                                    lebar_retak = retak_seg["lebar_calc"].mean() * 1000 
 
-                        # --- POTHOLE ---
                         jumlah_lubang = 0
                         if not gdf_pothole.empty:
                             pothole_seg = gpd.sjoin(gdf_pothole, seg_poly, predicate="within")
                             jumlah_lubang = len(pothole_seg)
 
-                        # --- RUTTING (Menggunakan Data DSM) ---
                         kedalaman_rutting = 0.0
                         if not gdf_rutting.empty:
                             rutting_seg = gpd.overlay(gdf_rutting, seg_poly, how="intersection")
                             if not rutting_seg.empty:
                                 kedalaman_rutting = rutting_seg["kedalaman_calc"].mean()
 
-                        # --- HITUNG SDI ---
                         kedalaman_rutting = 0 if pd.isna(kedalaman_rutting) else kedalaman_rutting
                         sdi1, sdi2, sdi3, sdi4, kondisi = hitung_sdi(persen_retak, lebar_retak, jumlah_lubang, kedalaman_rutting)
                         
@@ -409,19 +387,20 @@ if st.button("🚀 Proses & Hitung SDI", type="primary", use_container_width=Tru
                     elements.append(Image(grafik_path, width=4.5*inch, height=3*inch))
                     elements.append(PageBreak())
 
-                    elements.append(Paragraph("<b>3. Detail Data Kerusakan & SDI Per Segmen</b>", styles["Heading2"]))
+                    # --- TABEL 3: DATA KERUSAKAN TERUKUR ---
+                    elements.append(Paragraph("<b>3. Data Kerusakan Terukur Per Segmen</b>", styles["Heading2"]))
                     elements.append(Spacer(1, 0.2 * inch))
                     
-                    tabel_data = [["Segmen", "STA", "% Retak", "L. Retak\n(mm)", "Jml\nLubang", "Rutting\n(cm)", "SDI Akhir", "Kondisi"]]
+                    tabel1_data = [["Segmen", "STA", "% Retak", "Lebar Retak\n(mm)", "Jumlah\nLubang", "Rutting\n(cm)"]]
                     for _, row in df_sdi.iterrows():
                         sta_val = seg_gdf[seg_gdf["Segmen"] == row["Segmen"]].iloc[0]["STA"]
-                        tabel_data.append([
+                        tabel1_data.append([
                             str(row["Segmen"]), sta_val, str(row["%Retak"]), str(row["Lebar Retak (mm)"]), 
-                            str(row["Jumlah Lubang"]), str(row["Rutting (cm)"]), str(row["SDI4"]), row["Kondisi"]
+                            str(row["Jumlah Lubang"]), str(row["Rutting (cm)"])
                         ])
                         
-                    t_detail = Table(tabel_data, colWidths=[0.6*inch, 1.8*inch, 0.8*inch, 0.8*inch, 0.6*inch, 0.7*inch, 0.8*inch, 1*inch])
-                    t_detail.setStyle(TableStyle([
+                    t1_detail = Table(tabel1_data, repeatRows=1, colWidths=[0.8*inch, 2.0*inch, 1.0*inch, 1.2*inch, 1.0*inch, 1.0*inch])
+                    t1_detail.setStyle(TableStyle([
                         ('GRID', (0,0), (-1,-1), 0.5, colors.grey),
                         ('BACKGROUND', (0,0), (-1,0), colors.HexColor("#1e293b")),
                         ('TEXTCOLOR', (0,0), (-1,0), colors.white),
@@ -431,7 +410,33 @@ if st.button("🚀 Proses & Hitung SDI", type="primary", use_container_width=Tru
                         ('FONTSIZE', (0,0), (-1,-1), 9),
                         ('PADDING', (0,0), (-1,-1), 6)
                     ]))
-                    elements.append(t_detail)
+                    elements.append(t1_detail)
+                    elements.append(PageBreak())
+
+                    # --- TABEL 4: PERHITUNGAN BERJENJANG SDI ---
+                    elements.append(Paragraph("<b>4. Perhitungan Berjenjang SDI Per Segmen</b>", styles["Heading2"]))
+                    elements.append(Spacer(1, 0.2 * inch))
+                    
+                    tabel2_data = [["Segmen", "STA", "SDI 1\n(Retak)", "SDI 2\n(+L. Retak)", "SDI 3\n(+Lubang)", "SDI 4\n(+Rutting)", "Kondisi Akhir"]]
+                    for _, row in df_sdi.iterrows():
+                        sta_val = seg_gdf[seg_gdf["Segmen"] == row["Segmen"]].iloc[0]["STA"]
+                        tabel2_data.append([
+                            str(row["Segmen"]), sta_val, str(row["SDI1"]), str(row["SDI2"]), 
+                            str(row["SDI3"]), str(row["SDI4"]), row["Kondisi"]
+                        ])
+                        
+                    t2_detail = Table(tabel2_data, repeatRows=1, colWidths=[0.8*inch, 1.8*inch, 0.8*inch, 0.9*inch, 0.8*inch, 0.8*inch, 1.1*inch])
+                    t2_detail.setStyle(TableStyle([
+                        ('GRID', (0,0), (-1,-1), 0.5, colors.grey),
+                        ('BACKGROUND', (0,0), (-1,0), colors.HexColor("#1e293b")),
+                        ('TEXTCOLOR', (0,0), (-1,0), colors.white),
+                        ('ALIGN', (0,0), (-1,-1), 'CENTER'),
+                        ('VALIGN', (0,0), (-1,-1), 'MIDDLE'),
+                        ('FONTNAME', (0,0), (-1,0), 'Helvetica-Bold'),
+                        ('FONTSIZE', (0,0), (-1,-1), 9),
+                        ('PADDING', (0,0), (-1,-1), 6)
+                    ]))
+                    elements.append(t2_detail)
                     
                     doc.build(elements)
 

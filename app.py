@@ -13,6 +13,10 @@ import io
 import folium
 from streamlit_folium import st_folium
 
+# Import untuk ekstraksi DSM
+import rasterio
+from rasterstats import zonal_stats
+
 # Import untuk ReportLab (PDF)
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, Image, PageBreak
 from reportlab.lib import colors
@@ -27,7 +31,7 @@ from reportlab.lib.enums import TA_CENTER, TA_LEFT
 st.set_page_config(page_title="GeoSDI System", page_icon="🛣️", layout="wide")
 
 st.title("🛣️ GeoSDI: Sistem Analisis Kondisi Jalan")
-st.markdown("Otomatisasi perhitungan Surface Distress Index (SDI) berdasarkan data geospasial.")
+st.markdown("Otomatisasi perhitungan Surface Distress Index (SDI) dengan ekstraksi kedalaman rutting otomatis via DSM.")
 
 st.divider()
 
@@ -70,6 +74,35 @@ def read_zip_shapefile(uploaded_file, tmpdir):
                 return gpd.read_file(os.path.join(root, file))
     return None
 
+def hitung_depth_cm(gdf, dsm_path, buffer_distance=0.3):
+    """Menghitung kedalaman rutting dari DSM dalam satuan cm"""
+    with rasterio.open(dsm_path) as DSM:
+        dsm_crs = DSM.crs
+        nodata_val = DSM.nodata
+
+    if gdf.crs != dsm_crs:
+        gdf = gdf.to_crs(dsm_crs)
+
+    buffer_outer = gdf.geometry.buffer(buffer_distance)
+    ring_geom = buffer_outer.difference(gdf.geometry)
+
+    stats_hole = zonal_stats(gdf.geometry, dsm_path, stats=["percentile_10"], nodata=nodata_val)
+    stats_ring = zonal_stats(ring_geom, dsm_path, stats=["median"], nodata=nodata_val)
+
+    depth_list = []
+    for i in range(len(gdf)):
+        z_min = stats_hole[i]["percentile_10"]
+        z_ref = stats_ring[i]["median"]
+        
+        # Asumsi unit DSM adalah meter, kalikan 100 untuk menjadi cm
+        depth = (z_ref - z_min) * 100 if (z_min is not None and z_ref is not None) else 0
+        depth = max(0, min(depth, 15)) # Clamp realistis max 15 cm untuk rutting SDI
+        depth_list.append(depth)
+
+    gdf = gdf.copy()
+    gdf["kedalaman_calc"] = depth_list
+    return gdf
+
 def hitung_sdi(persen_retak, lebar_retak, jumlah_lubang, kedalaman_rutting):
     # SDI 1 (Persentase Luas Retak)
     if persen_retak == 0:
@@ -94,7 +127,7 @@ def hitung_sdi(persen_retak, lebar_retak, jumlah_lubang, kedalaman_rutting):
     else:
         sdi3 = sdi2 + 225
 
-    # SDI 4 (Kedalaman Rutting/Alur)
+    # SDI 4 (Kedalaman Rutting/Alur dalam cm)
     if kedalaman_rutting == 0:
         sdi4 = sdi3
     elif kedalaman_rutting < 1:
@@ -141,20 +174,30 @@ with st.sidebar:
 # =========================================
 # TAMPILAN UTAMA (UPLOAD FILES)
 # =========================================
-col1, col2 = st.columns(2)
+col1, col2, col3 = st.columns(3)
 
 with col1:
-    st.subheader("📁 1. Data Dasar")
+    st.subheader("📁 1. Data Dasar Jalan")
     jalan_file = st.file_uploader("Upload Shapefile Jalan (.zip)", type="zip", key="jalan")
-    
-    st.info("💡 Pastikan EPSG sesuai dengan zona UTM wilayah studi agar perhitungan luas dan jarak akurat.")
+    st.info("💡 Pastikan EPSG sesuai zona UTM wilayah agar hitungan presisi.")
 
 with col2:
-    st.subheader("⚠️ 2. Data Kerusakan (Distress)")
-    retak_file = st.file_uploader("Upload SHP Retak / Cracks (.zip) [Poligon]", type="zip", key="retak")
-    pothole_file = st.file_uploader("Upload SHP Lubang / Pothole (.zip) [Point/Poligon]", type="zip", key="pothole")
-    rutting_file = st.file_uploader("Upload SHP Rutting / Alur (.zip) [Poligon]", type="zip", key="rutting")
-    st.caption("Catatan: Untuk SHP Rutting, pastikan terdapat atribut/kolom yang mengandung nilai kedalaman dalam satuan **cm**.")
+    st.subheader("⚠️ 2. Data Kerusakan")
+    retak_file = st.file_uploader("SHP Retak (.zip) [Poligon]", type="zip", key="retak")
+    pothole_file = st.file_uploader("SHP Lubang (.zip) [Point/Poligon]", type="zip", key="pothole")
+    rutting_file = st.file_uploader("SHP Rutting (.zip) [Poligon]", type="zip", key="rutting")
+
+with col3:
+    st.subheader("🗺️ 3. DSM untuk Rutting")
+    dsm_mode = st.radio("Cara Input Data DSM:", ["Upload File .tif", "Paste Link Google Drive"])
+    dsm_file = None
+    dsm_link = ""
+    
+    if dsm_mode == "Upload File .tif":
+        dsm_file = st.file_uploader("Upload Data DSM (.tif)", type="tif")
+    else:
+        dsm_link = st.text_input("Paste Link Shareable Google Drive (.tif)")
+        st.caption("Pastikan akses link Google Drive diatur ke 'Anyone with the link'.")
 
 st.divider()
 
@@ -163,16 +206,38 @@ st.divider()
 # =========================================
 if st.button("🚀 Proses & Hitung SDI", type="primary", use_container_width=True):
     
-    if not jalan_file:
-        st.error("⚠️ Mohon upload minimal Shapefile Jalan.")
+    is_dsm_valid = False
+    if dsm_mode == "Upload File .tif" and dsm_file is not None:
+        is_dsm_valid = True
+    elif dsm_mode == "Paste Link Google Drive" and dsm_link != "":
+        is_dsm_valid = True
+
+    if not jalan_file or not is_dsm_valid:
+        st.error("⚠️ Mohon lengkapi Shapefile Jalan dan Data DSM (Upload File / Link) untuk melanjutkan.")
     else:
-        with st.spinner("Memproses Analisis Geospasial SDI... (Ini mungkin memakan waktu beberapa saat)"):
+        with st.spinner("Memproses Analisis Geospasial SDI & Ekstraksi DSM... (Mungkin memakan waktu beberapa saat)"):
             with tempfile.TemporaryDirectory() as tmpdir:
                 try:
-                    # 1. BACA JALAN & BUAT SEGMEN
+                    # 1. DOWNLOAD ATAU SIMPAN DSM
+                    dsm_path = os.path.join(tmpdir, "dsm.tif")
+                    if dsm_mode == "Upload File .tif":
+                        with open(dsm_path, "wb") as f:
+                            f.write(dsm_file.getbuffer())
+                    elif dsm_mode == "Paste Link Google Drive":
+                        st.info("⏳ Mengunduh DSM dari Google Drive...")
+                        import gdown
+                        import re
+                        match = re.search(r"/d/([a-zA-Z0-9_-]+)", dsm_link)
+                        if match:
+                            file_id = match.group(1)
+                            gdown.download(id=file_id, output=dsm_path, quiet=False)
+                        else:
+                            st.error("❌ Link Google Drive tidak valid. Pastikan format link benar.")
+                            st.stop()
+
+                    # 2. BACA JALAN & BUAT SEGMEN
                     jalan = read_zip_shapefile(jalan_file, tmpdir)
                     if jalan.crs is None:
-                        st.error("CRS shapefile jalan tidak terdefinisi! Set manual ke EPSG default.")
                         jalan.set_crs(epsg=4326, inplace=True)
                     if jalan.crs.to_epsg() != epsg_code:
                         jalan = jalan.to_crs(epsg=epsg_code)
@@ -188,16 +253,14 @@ if st.button("🚀 Proses & Hitung SDI", type="primary", use_container_width=Tru
                     seg_gdf["Segmen"] = range(1, len(seg_gdf)+1)
                     seg_gdf["STA"] = seg_gdf["Segmen"].apply(lambda x: f"{(x-1)*interval_segmen:03.0f}+000 - {min(x*interval_segmen, int(panjang_total)):03.0f}+000")
                     
-                    # Buffer berdasarkan lebar jalan untuk menghitung luas area segmen
                     seg_gdf["geometry"] = seg_gdf.buffer(lebar_jalan / 2, cap_style=2)
                     seg_gdf["Luas_Segmen"] = seg_gdf.geometry.area
                     
-                    # 2. BACA DATA KERUSAKAN
+                    # 3. BACA DATA KERUSAKAN
                     gdf_retak = read_zip_shapefile(retak_file, tmpdir) if retak_file else gpd.GeoDataFrame(columns=['geometry'], crs=seg_gdf.crs)
                     gdf_pothole = read_zip_shapefile(pothole_file, tmpdir) if pothole_file else gpd.GeoDataFrame(columns=['geometry'], crs=seg_gdf.crs)
                     gdf_rutting = read_zip_shapefile(rutting_file, tmpdir) if rutting_file else gpd.GeoDataFrame(columns=['geometry'], crs=seg_gdf.crs)
                     
-                    # Konversi CRS agar seragam
                     for gdf in [gdf_retak, gdf_pothole, gdf_rutting]:
                         if not gdf.empty:
                             if gdf.crs is None:
@@ -205,10 +268,11 @@ if st.button("🚀 Proses & Hitung SDI", type="primary", use_container_width=Tru
                             elif gdf.crs != seg_gdf.crs:
                                 gdf.to_crs(seg_gdf.crs, inplace=True)
 
+                    # PROSES KEDALAMAN RUTTING OTOMATIS DARI DSM
                     if not gdf_rutting.empty:
-                        gdf_rutting.columns = [str(c).lower() for c in gdf_rutting.columns]
+                        gdf_rutting = hitung_depth_cm(gdf_rutting, dsm_path)
 
-                    # 3. KALKULASI OVERLAY & SDI PER SEGMEN
+                    # 4. KALKULASI OVERLAY & SDI PER SEGMEN
                     hasil_sdi = []
                     
                     for idx, seg in seg_gdf.iterrows():
@@ -223,8 +287,6 @@ if st.button("🚀 Proses & Hitung SDI", type="primary", use_container_width=Tru
                             if not retak_seg.empty:
                                 luas_retak = retak_seg.geometry.area.sum()
                                 persen_retak = (luas_retak / luas_seg) * 100 if luas_seg > 0 else 0
-                                
-                                # Estimasi lebar retak (Area / Keliling garis batas) jika input polygon
                                 lengths = retak_seg.geometry.length
                                 valid_lengths = lengths[lengths > 0]
                                 if len(valid_lengths) > 0:
@@ -237,18 +299,12 @@ if st.button("🚀 Proses & Hitung SDI", type="primary", use_container_width=Tru
                             pothole_seg = gpd.sjoin(gdf_pothole, seg_poly, predicate="within")
                             jumlah_lubang = len(pothole_seg)
 
-                        # --- RUTTING ---
+                        # --- RUTTING (Menggunakan Data DSM) ---
                         kedalaman_rutting = 0.0
                         if not gdf_rutting.empty:
                             rutting_seg = gpd.overlay(gdf_rutting, seg_poly, how="intersection")
                             if not rutting_seg.empty:
-                                col_kedalaman = next((c for c in rutting_seg.columns if "dalam" in c or "depth" in c), None)
-                                if col_kedalaman:
-                                    kedalaman_rutting = pd.to_numeric(rutting_seg[col_kedalaman], errors='coerce').mean()
-                                else:
-                                    num_cols = rutting_seg.select_dtypes(include=np.number).columns
-                                    if len(num_cols) > 0:
-                                        kedalaman_rutting = rutting_seg[num_cols[0]].mean()
+                                kedalaman_rutting = rutting_seg["kedalaman_calc"].mean()
 
                         # --- HITUNG SDI ---
                         kedalaman_rutting = 0 if pd.isna(kedalaman_rutting) else kedalaman_rutting
@@ -264,24 +320,17 @@ if st.button("🚀 Proses & Hitung SDI", type="primary", use_container_width=Tru
                             "Kondisi": kondisi
                         })
 
-                    # 4. GABUNGKAN KE DATAFRAME
+                    # 5. GABUNGKAN KE DATAFRAME
                     df_sdi = pd.DataFrame(hasil_sdi)
                     seg_gdf = seg_gdf.merge(df_sdi, on="Segmen", how="left")
                     
                     # =========================================
                     # VISUALISASI PETA & GRAFIK
                     # =========================================
-                    warna_kondisi = {
-                        "Baik": "#2ecc71", 
-                        "Sedang": "#f1c40f", 
-                        "Rusak Ringan": "#e67e22", 
-                        "Rusak Berat": "#e74c3c"
-                    }
+                    warna_kondisi = {"Baik": "#2ecc71", "Sedang": "#f1c40f", "Rusak Ringan": "#e67e22", "Rusak Berat": "#e74c3c"}
                     
-                    # Peta Matplotlib
                     fig_map, ax_map = plt.subplots(figsize=(10,6))
                     seg_gdf.boundary.plot(ax=ax_map, linewidth=0.5, color="black")
-                    
                     legend_handles = []
                     for kondisi, warna in warna_kondisi.items():
                         subset = seg_gdf[seg_gdf["Kondisi"] == kondisi]
@@ -297,14 +346,12 @@ if st.button("🚀 Proses & Hitung SDI", type="primary", use_container_width=Tru
                     
                     if legend_handles:
                         ax_map.legend(handles=legend_handles, loc="best", title="Kategori Kondisi", fontsize=8, title_fontsize=9)
-                    
                     ax_map.set_title("Peta Kondisi Jalan Metode SDI", fontsize=12, weight="bold")
                     ax_map.axis("off")
                     peta_path = os.path.join(tmpdir, "peta_sdi.png")
                     plt.savefig(peta_path, dpi=300, bbox_inches='tight')
                     plt.close(fig_map)
                     
-                    # Grafik Matplotlib
                     fig_bar, ax_bar = plt.subplots(figsize=(6,4))
                     rekap = seg_gdf["Kondisi"].value_counts()
                     warna_bar = [warna_kondisi.get(x, "grey") for x in rekap.index]
@@ -323,14 +370,10 @@ if st.button("🚀 Proses & Hitung SDI", type="primary", use_container_width=Tru
                     doc = SimpleDocTemplate(pdf_path, pagesize=pagesizes.A4, rightMargin=30, leftMargin=30, topMargin=30, bottomMargin=30)
                     elements = []
                     styles = getSampleStyleSheet()
-                    
                     cover_style = ParagraphStyle('cover', parent=styles['Title'], alignment=TA_CENTER)
-                    header_style = ParagraphStyle('header', parent=styles['Normal'], alignment=TA_LEFT, fontSize=12, spaceAfter=10, textColor=colors.HexColor("#1f2937"))
-                    
                     rata_sdi = round(df_sdi["SDI4"].mean(), 2)
                     kondisi_dominan = df_sdi["Kondisi"].value_counts().idxmax() if not df_sdi.empty else "-"
 
-                    # --- COVER ---
                     elements.append(Paragraph(instansi, cover_style))
                     elements.append(Spacer(1, 0.3*inch))
                     elements.append(Paragraph("LAPORAN SURVEY", cover_style))
@@ -343,7 +386,6 @@ if st.button("🚀 Proses & Hitung SDI", type="primary", use_container_width=Tru
                     elements.append(Paragraph(f"<b>Tanggal :</b> {tanggal}", styles["Normal"]))
                     elements.append(PageBreak())
 
-                    # --- 1. RINGKASAN ---
                     elements.append(Paragraph("<b>1. Ringkasan Rekapitulasi Umum</b>", styles["Heading2"]))
                     ringkasan_table = Table([
                         ["Lokasi", lokasi], ["STA", sta_umum], 
@@ -361,14 +403,12 @@ if st.button("🚀 Proses & Hitung SDI", type="primary", use_container_width=Tru
                     elements.append(ringkasan_table)
                     elements.append(Spacer(1, 0.3 * inch))
 
-                    # --- 2. PETA & GRAFIK ---
                     elements.append(Paragraph("<b>2. Visualisasi Kondisi Jalan</b>", styles["Heading2"]))
                     elements.append(Image(peta_path, width=7.5*inch, height=4.5*inch))
                     elements.append(Spacer(1, 0.2 * inch))
                     elements.append(Image(grafik_path, width=4.5*inch, height=3*inch))
                     elements.append(PageBreak())
 
-                    # --- 3. TABEL DETAIL KERUSAKAN ---
                     elements.append(Paragraph("<b>3. Detail Data Kerusakan & SDI Per Segmen</b>", styles["Heading2"]))
                     elements.append(Spacer(1, 0.2 * inch))
                     
@@ -396,7 +436,7 @@ if st.button("🚀 Proses & Hitung SDI", type="primary", use_container_width=Tru
                     doc.build(elements)
 
                     # =========================================
-                    # PEMBUATAN FILE SPASIAL (GPKG) & EXCEL
+                    # PEMBUATAN FILE SPASIAL & EXCEL
                     # =========================================
                     gpkg_path = os.path.join(tmpdir, "Peta_Hasil_SDI.gpkg")
                     export_gdf = seg_gdf.copy()
@@ -417,14 +457,10 @@ if st.button("🚀 Proses & Hitung SDI", type="primary", use_container_width=Tru
                     st.session_state.seg_gdf = seg_gdf           
                     st.session_state.excel_bytes = excel_bytes   
                     
-                    with open(peta_path, "rb") as f:
-                        st.session_state.peta_bytes = f.read()
-                    with open(grafik_path, "rb") as f:
-                        st.session_state.grafik_bytes = f.read()
-                    with open(pdf_path, "rb") as f:
-                        st.session_state.pdf_bytes = f.read()
-                    with open(gpkg_path, "rb") as f:                
-                        st.session_state.gpkg_bytes = f.read()       
+                    with open(peta_path, "rb") as f: st.session_state.peta_bytes = f.read()
+                    with open(grafik_path, "rb") as f: st.session_state.grafik_bytes = f.read()
+                    with open(pdf_path, "rb") as f: st.session_state.pdf_bytes = f.read()
+                    with open(gpkg_path, "rb") as f: st.session_state.gpkg_bytes = f.read()       
                         
                     st.session_state.proses_selesai = True
 
@@ -464,7 +500,6 @@ if st.session_state.proses_selesai:
                     style="font-family: Arial; font-size: 12px; padding: 5px;"
                 )
             ).add_to(m)
-            
             st_folium(m, use_container_width=True, height=400)
             
     with col_res2:
@@ -489,19 +524,10 @@ if st.session_state.proses_selesai:
             ("Rusak Ringan", "#e67e22", "white", "101 - 150"),
             ("Rusak Berat", "#e74c3c", "white", "> 150")
         ]
-        
         for nama, bg, txt, rentang in skala_sdi:
-            html_baris = f"""
-            <div style='background-color: {bg}; color: {txt}; padding: 10px; margin-bottom: 5px; border-radius: 5px; display: flex; justify-content: space-between; font-weight: bold;'>
-                <span>{nama}</span>
-                <span>{rentang}</span>
-            </div>
-            """
+            html_baris = f"<div style='background-color: {bg}; color: {txt}; padding: 10px; margin-bottom: 5px; border-radius: 5px; display: flex; justify-content: space-between; font-weight: bold;'><span>{nama}</span><span>{rentang}</span></div>"
             st.markdown(html_baris, unsafe_allow_html=True)
 
-    # =========================================
-    # FITUR DASHBOARD DETAIL PER SEGMEN
-    # =========================================
     st.markdown("---")
     st.subheader("🔎 Dashboard Detail Perhitungan Segmen")
     st.markdown("Pilih nomor segmen di bawah ini untuk melihat rincian perhitungan Indeks SDI berjenjang.")
@@ -517,12 +543,7 @@ if st.session_state.proses_selesai:
         st.markdown(f"#### REPORT SEGMEN : {pilihan_segmen} (STA: {sta_display})")
 
         def metric_card(label, value, value_color="#4da6ff", bg_color="#1E2A38", text_color="#cbd5e1"):
-            return f"""
-            <div style="background-color: {bg_color}; padding: 15px; border-radius: 8px; border: 1px solid #2d3e50; text-align: center; height: 100%;">
-                <p style="margin: 0px; font-size: 14px; color: {text_color};">{label}</p>
-                <h2 style="margin: 5px 0px 0px 0px; color: {value_color}; font-size: 22px; font-weight: bold;">{value}</h2>
-            </div>
-            """
+            return f'<div style="background-color: {bg_color}; padding: 15px; border-radius: 8px; border: 1px solid #2d3e50; text-align: center; height: 100%;"><p style="margin: 0px; font-size: 14px; color: {text_color};">{label}</p><h2 style="margin: 5px 0px 0px 0px; color: {value_color}; font-size: 22px; font-weight: bold;">{value}</h2></div>'
 
         st.markdown("**A. Data Kerusakan Terukur**")
         col_m1, col_m2, col_m3, col_m4 = st.columns(4)

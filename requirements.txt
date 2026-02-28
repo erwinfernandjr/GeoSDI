@@ -3,9 +3,11 @@ geopandas
 pandas
 numpy
 matplotlib
-scipy
-rasterstats
-rasterio
 shapely
+rasterio
+rasterstats
+folium
+streamlit-folium
 reportlab
-openpyxl
+gdown
+xlsxwriter

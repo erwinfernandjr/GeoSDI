@@ -1,0 +1,11 @@
+streamlit
+geopandas
+pandas
+numpy
+matplotlib
+scipy
+rasterstats
+rasterio
+shapely
+reportlab
+openpyxl
